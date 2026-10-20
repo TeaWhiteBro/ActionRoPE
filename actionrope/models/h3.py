@@ -20,7 +20,8 @@ Paper settings
 
 Base model files: the FL2VA partition of the MiniMax-H3 release (``text_encoder/``, ``transformer/``,
 ``video_vae/source/``, ``audio_vae/``, ``processor/``) in ``model_dir``. The text encoder (64 GB) and the DiT (67 GB)
-do not fit on one 80-141 GB GPU together; ``Generator`` swaps them unless ``text_device`` names a second GPU.
+do not fit on one 80-141 GB GPU together; ``Generator`` runs the text encoder in a separate process on the same GPU
+(as the paper's evaluation did, see ``Generator``) unless ``text_device`` names a second GPU.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ import glob
 import hashlib
 import os
 import random
+from queue import Empty
 
 import numpy as np
 import torch
@@ -90,6 +92,12 @@ def encode_prompt(pipe, prompt: str, first_frame: np.ndarray):
                                pixel_values=pixel_values.to(pipe.device, pipe.torch_dtype),
                                image_grid_thw=image_grid_thw.to(pipe.device, torch.long))
     return hidden.to(torch.bfloat16).cpu(), tags.view(-1).to(torch.long)
+
+
+def _text_worker(model_dir: str, device: str, prompt: str, first_frames: list, queue) -> None:
+    """Child process of ``Generator.encode_prompts``: load the text encoder, embed, send the CPU tensors back."""
+    pipe = load_pipeline(model_dir, ("text_encoder",), device)
+    queue.put([encode_prompt(pipe, prompt, f) for f in first_frames])
 
 
 @torch.no_grad()
@@ -198,17 +206,23 @@ def decode(pipe, latents: torch.Tensor) -> np.ndarray:
 class Generator:
     """First frame + per-frame camera offsets -> clip.
 
-    The DiT is loaded on the first call. The text encoder runs on ``text_device`` if given (and stays there);
-    otherwise it is loaded on ``device`` while the DiT waits on the CPU. Text embeddings are cached per
-    (first frame, prompt); call ``encode_prompts`` first to embed many first frames in one text-encoder session.
+    The DiT is loaded on the first call. The text encoder runs on ``text_device`` if given (and stays there).
+    Otherwise it runs on ``device`` in a short-lived child process while the DiT waits on the CPU: the paper's
+    evaluation embedded the text in a separate process, and running the 64 GB text encoder inside the sampling process
+    changes the GPU kernels the DiT gets afterwards (a bf16-rounding-level difference). ``text_subprocess=False``
+    runs it in-process instead. The child is started with ``spawn``, so a script that uses the Generator needs the
+    usual ``if __name__ == "__main__":`` guard. Text embeddings are cached per (first frame, prompt); call
+    ``encode_prompts`` first to embed many first frames in one text-encoder session.
     """
 
-    def __init__(self, ckpt: str, model_dir: str, device: str = "cuda", text_device: str | None = None):
+    def __init__(self, ckpt: str, model_dir: str, device: str = "cuda", text_device: str | None = None,
+                 text_subprocess: bool = True):
         meta = read_metadata(ckpt)
         if meta.get("model") != MODEL_NAME or meta.get("format") != "lora":
             raise ValueError(f"{ckpt} is not a {MODEL_NAME} LoRA checkpoint")
         self.ckpt, self.model_dir, self.device = ckpt, model_dir, device
         self.text_device = text_device if text_device not in (None, device) else None
+        self.text_subprocess = bool(text_subprocess)
         self.num_frames = int(meta.get("num_frames", NUM_FRAMES))
         latent_frames(self.num_frames)
         self.cns = meta_bool(meta, "cns")
@@ -235,25 +249,46 @@ class Generator:
         return prompt, hashlib.sha1(np.ascontiguousarray(first_frame).tobytes()).hexdigest()
 
     def encode_prompts(self, first_frames, prompt: str = NULL_PROMPT) -> None:
-        todo = [f for f in first_frames if self._key(f, prompt) not in self._text_cache]
+        todo = [np.ascontiguousarray(f) for f in first_frames if self._key(f, prompt) not in self._text_cache]
         if not todo:
             return
-        if self.text_device is None:
+        if self.text_device is not None:
+            if self._text_pipe is None:
+                self._text_pipe = load_pipeline(self.model_dir, ("text_encoder",), self.text_device)
+            embs = [encode_prompt(self._text_pipe, prompt, f) for f in todo]
+        else:
             if self.pipe is not None and not self._dit_on_cpu:
                 self.pipe.dit.to("cpu")
                 self._dit_on_cpu = True
                 torch.cuda.empty_cache()
-            text_pipe = load_pipeline(self.model_dir, ("text_encoder",), self.device)
-        else:
-            if self._text_pipe is None:
-                self._text_pipe = load_pipeline(self.model_dir, ("text_encoder",), self.text_device)
-            text_pipe = self._text_pipe
-        for f in todo:
-            self._text_cache[self._key(f, prompt)] = encode_prompt(text_pipe, prompt, f)
-        if self.text_device is None:
-            del text_pipe
-            gc.collect()
-            torch.cuda.empty_cache()
+            if self.text_subprocess:
+                embs = self._encode_in_child(prompt, todo)
+            else:
+                text_pipe = load_pipeline(self.model_dir, ("text_encoder",), self.device)
+                embs = [encode_prompt(text_pipe, prompt, f) for f in todo]
+                del text_pipe
+                gc.collect()
+                torch.cuda.empty_cache()
+        for f, e in zip(todo, embs):
+            self._text_cache[self._key(f, prompt)] = e
+
+    def _encode_in_child(self, prompt: str, first_frames: list) -> list:
+        import torch.multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        queue = ctx.Queue()
+        proc = ctx.Process(target=_text_worker, args=(self.model_dir, self.device, prompt, first_frames, queue))
+        proc.start()
+        embs = None
+        while embs is None:
+            try:
+                embs = queue.get(timeout=5)
+            except Empty:
+                if not proc.is_alive():
+                    break
+        proc.join()
+        if embs is None or proc.exitcode != 0:
+            raise RuntimeError(f"text encoder process failed (exit code {proc.exitcode})")
+        return [(text.clone(), tags.clone()) for text, tags in embs]
 
     def __call__(self, first_frame: np.ndarray, frame_offset_px: np.ndarray, prompt: str = NULL_PROMPT, seed: int = 0,
                  steps: int = SAMPLE_STEPS, flow_shift: float = SAMPLE_SHIFT, audio_shift: float = AUDIO_SHIFT):
