@@ -1,0 +1,49 @@
+# MiniMax-H3 33B (FL2VA) + ActionRoPE + CNS: LoRA rank 128 + known/new input channel.
+#
+#   accelerate launch --config_file configs/accelerate/zero2_ga1.yaml scripts/train.py --config configs/train/h3.yaml \
+#       --set annotations=data/annotations.jsonl latent_dir=data/latents/h3 output=runs/h3
+#
+# 8 GPUs x 1 clip x grad_accum 1 = batch 8 (zero2_ga1.yaml). ZeRO-2 keeps a full bf16 copy of the 33B DiT on every
+# GPU: the paper run peaked at ~78 GB per GPU (H200) and every process first loads the DiT (~67 GB) into CPU memory.
+# Latents: scripts/encode_latents.py --model h3 (video latent of the first 73 frames, first-frame condition tokens and
+# the FL2VA text embeddings of the scene prompt and of NULL_PROMPT, per clip).
+#
+# Note: the released checkpoint was trained on 20,982 clips, i.e. without the real-time (min_rt_ratio) and
+# transition-leak filters that the other backbones use; this config applies them (18,528 clips, as in the paper text).
+model: h3
+model_dir: models/MiniMax-H3/FL2VA
+annotations: data/annotations.jsonl
+latent_dir: data/latents/h3
+output: runs/h3
+
+lr: 1.0e-4
+weight_decay: 0.01
+warmup_steps: 200
+max_steps: 5000
+grad_accum: 1
+grad_clip: 1.0
+save_every: 500
+val_every: 500
+val_timesteps: [899, 689, 357]      # indices of the training table at t = 200 / 500 / 800
+num_workers: 2
+seed: 0
+log_every: 10
+
+# data
+num_frames: 73                      # 17n + 5 frames: the first 73 frames of every 81-frame clip
+scene_dropout: 0.1                  # probability of NULL_PROMPT instead of the scene prompt
+min_rt_ratio: 0.8
+val_min_rt_ratio: 0.9
+val_clips: 16
+
+# model
+lora_rank: 128
+lora_alpha: 128
+mask_channel: true
+gradient_checkpointing: true
+train_shift: 2.22                   # shift of the 1000-step training timestep table (DiffSynth's H3 recipe)
+new_weight: 2.0                     # loss weight of newly revealed tokens (known tokens: 1)
+cns_alpha: 1.0
+cns_shift: 12.0                     # S = H3's sampling shift
+cns_shift_known: 4.8                # S_known = 0.4 S
+audio_silence: null                 # optional file with the silent audio latent; default: encoded at start-up

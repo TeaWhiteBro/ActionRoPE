@@ -1,0 +1,47 @@
+# LTX-2.5 (22B) + ActionRoPE + CNS, the recipe of the released checkpoint (checkpoints/ltx-2.5-22b/actionrope_cns.safetensors).
+# Launch with configs/accelerate/zero2_ga2.yaml on 8 GPUs: 8 GPUs x 1 clip x 2 accumulation steps = 16 clips per step.
+#   accelerate launch --config_file configs/accelerate/zero2_ga2.yaml scripts/train.py --config configs/train/ltx.yaml
+# LoRA training needs about 43 GB per GPU (bf16, ZeRO-2 without offload, gradient checkpointing).
+
+model: ltx
+model_dir: models/LTX-2.5                         # Lightricks/LTX-2.5 (only the DiT file is loaded for training)
+repack_dir: models/LTX-2.5-Repackage              # DiffSynth-Studio/LTX-2.5-Repackage (tokenizer)
+annotations: data/annotations.jsonl
+latent_dir: data/latents/ltx                      # scripts/encode_latents.py --model ltx
+text_table: data/text_table_ltx.pt                # scripts/build_text_table.py --model ltx
+output: runs/ltx
+
+# optimisation (AdamW, linear warm-up then constant learning rate, bf16)
+lr: 1.0e-4
+weight_decay: 0.01
+warmup_steps: 200
+max_steps: 5000
+grad_accum: 2
+grad_clip: 1.0
+seed: 0
+num_workers: 2
+gradient_checkpointing: true
+
+# LoRA on the 480 video attention / FFN linears; the known/new input channel is trained in full
+lora_rank: 128
+lora_alpha: 128
+export_format: full                               # full: complete DiT with the LoRA merged (38 GB); lora: factors only
+
+# method
+mask_channel: true                                # known/new input channel
+new_weight: 2.0                                   # loss weight of newly revealed tokens
+scene_dropout: 0.1                                # probability of replacing the scene prompts by NULL_PROMPT
+cns: true                                         # Coordinate-Conditioned Noise Scheduling, S = e^2.05
+cns_shift_known: 3.1
+cns_alpha: 1.0
+
+# data filters (actionrope.data.training_clips / validation_clips)
+min_rt_ratio: 0.8
+val_min_rt_ratio: 0.9
+val_clips: 16
+
+# logging / checkpoints
+log_every: 10
+save_every: 500
+val_every: 500
+val_timesteps: [983, 905, 687]                    # training timestep indices of t = 200, 500, 800

@@ -1,0 +1,42 @@
+# SkyReels-V2-DF-1.3B-540P + ActionRoPE + CNS: the recipe of the released checkpoint.
+# 8 GPUs x batch 1 x grad_accum 2 = 16 clips per step, full fine-tuning, about 18 h on 8 H200:
+#   accelerate launch --config_file configs/accelerate/zero2_ga2.yaml scripts/train.py --config configs/train/skyreels.yaml \
+#       --set annotations=data/annotations.jsonl latent_dir=data/latents/skyreels output=runs/skyreels
+
+model: skyreels
+model_dir: models/SkyReels-V2-DF-1.3B-540P     # needs model.safetensors (fp32 official weights)
+annotations: data/annotations.jsonl
+latent_dir: data/latents/skyreels               # scripts/encode_latents.py --model skyreels
+val_latent_dir: null                            # null: validation latents are in latent_dir too
+text_table: data/text_table_umt5.pt             # scripts/build_text_table.py (shared with Wan2.2)
+output: runs/skyreels
+
+# optimisation (actionrope/trainer.py)
+lr: 1.0e-5
+weight_decay: 0.01
+warmup_steps: 200            # linear warm-up, then constant
+max_steps: 5000
+grad_accum: 2
+grad_clip: 1.0
+save_every: 500
+val_every: 500
+val_timesteps: [952, 833, 556]   # training timestep indices of t = 201, 501, 800
+num_workers: 2
+seed: 0
+log_every: 1
+
+# data
+min_rt_ratio: 0.8            # training filter (actionrope.data.training_clips)
+val_min_rt_ratio: 0.9
+val_clips: 16                # validation clips that monitor the loss
+scene_dropout: 0.1           # whole clip -> NULL_PROMPT
+
+# model
+mask_channel: true           # known/new input channel
+new_weight: 2.0              # loss weight of newly revealed latent cells
+shift: 5.0                   # Wan flow-matching shift (training timesteps; base shift S of CNS)
+cns: true
+cns_shift_known: 2.0         # S_known
+cns_alpha: 1.0
+fps_index: 0                 # SkyReels frame-rate branch, 16 fps bucket (null: do not use the branch)
+gradient_checkpointing: true

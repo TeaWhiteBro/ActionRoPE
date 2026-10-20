@@ -1,0 +1,19 @@
+# Install PyTorch for your CUDA version first, e.g.
+#   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cu128
+# The versions below are the ones all results were produced with.
+diffsynth @ git+https://github.com/modelscope/DiffSynth-Studio@7686e54d41d25c0e8ed5f1318acc23b6bb832654
+transformers==5.16.1
+accelerate==1.14.0
+deepspeed==0.19.6
+safetensors==0.8.0
+einops==0.8.2
+numpy==2.5.2
+pillow==12.3.0
+pyyaml==6.0.3
+av==18.1.0
+imageio==2.37.4
+imageio-ffmpeg==0.6.0
+modelscope==1.39.1
+huggingface_hub==1.30.0
+# tests
+pytest

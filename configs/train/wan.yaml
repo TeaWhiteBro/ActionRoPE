@@ -1,0 +1,43 @@
+# Wan2.2-TI2V-5B + ActionRoPE + CNS: the recipe of the released checkpoint (full fine-tuning of the DiT from the base
+# weights; 8 GPUs x batch 1 x gradient accumulation 2 = 16 clips per step, bf16, DeepSpeed ZeRO-2).
+#
+#   accelerate launch --config_file configs/accelerate/zero2_ga2.yaml scripts/train.py --config configs/train/wan.yaml
+#
+# Paths are relative placeholders; override them with --set key=value.
+model: wan
+model_dir: models/Wan2.2-TI2V-5B          # DiT shards + Wan2.2_VAE.pth (+ UMT5 for the text table)
+annotations: data/annotations.jsonl
+latent_dir: data/latents/wan              # scripts/encode_latents.py --model wan
+text_table: data/text_table_umt5.pt       # scripts/build_text_table.py --model wan
+output: runs/wan
+
+# optimisation (AdamW, constant learning rate after a linear warm-up counted in optimiser steps)
+lr: 1.0e-5
+weight_decay: 0.01
+warmup_steps: 500
+max_steps: 5000
+grad_accum: 2
+grad_clip: 1.0
+gradient_checkpointing: true
+seed: 0
+num_workers: 2
+log_every: 10
+save_every: 1000
+
+# monitoring: weighted loss on 16 validation clips at timestep indices 952, 833, 556 (t = 201, 501, 800)
+val_every: 500
+val_clips: 16
+val_timesteps: [952, 833, 556]
+
+# data
+min_rt_ratio: 0.8          # training clips recorded below 80 % of real time are dropped
+val_min_rt_ratio: 0.9
+scene_dropout: 0.1         # probability that a whole clip is trained with NULL_PROMPT
+
+# method
+mask_channel: true         # zero-initialised known/new input channel
+new_weight: 2.0            # loss weight of newly revealed latent cells
+cns: true                  # Coordinate-Conditioned Noise Scheduling
+cns_shift: 5.0             # base shift S (the Wan2.2 schedule)
+cns_shift_known: 2.0       # shift S_known of known tokens
+cns_alpha: 1.0
